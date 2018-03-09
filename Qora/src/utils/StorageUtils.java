@@ -6,10 +6,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.json.simple.JSONObject;
 import org.json.simple.JSONValue;
 
@@ -26,6 +26,7 @@ import qora.web.OrphanNameStorageHelperMap;
 import qora.web.OrphanNameStorageMap;
 
 public class StorageUtils {
+	private static final Logger LOGGER = LogManager.getLogger(StorageUtils.class);
 
 	// REPLACES CURRENT VALUE
 	public static final String ADD_COMPLETE_KEY = "addcomplete";
@@ -40,24 +41,62 @@ public class StorageUtils {
 	// ADD PATCH TO CURRENT VALUE
 	public static final String PATCH_KEY = "patch";
 
+	/**
+	 * Attempt to extract JSON object using key
+	 * <p>
+	 * Automatically removes String-encapsulation
+	 * 
+	 * @param {JSONObject}
+	 *            jsonObject
+	 * @param {String}
+	 *            mainKey
+	 * @return JSONObject or null
+	 */
+	private static JSONObject getDataByKey(JSONObject jsonObject, String mainKey) {
+		Object jsonData = jsonObject.get(mainKey);
 
+		if (jsonData == null)
+			return null;
+
+		// remove string encapsulation
+		if (jsonData instanceof String)
+			jsonData = JSONValue.parse((String) jsonData);
+
+		// must be JSON object now
+		if (!(jsonData instanceof JSONObject)) {
+			LOGGER.warn("Expecting JSONObject while looking for \"" + mainKey + "\" data");
+			return null;
+		}
+
+		return (JSONObject) jsonData;
+	}
+
+	/**
+	 * Generate JSON object representing add/remove/patch storage actions
+	 * <p>
+	 * 
+	 * @param addCompleteKeys
+	 * @param removeCompleteKeys
+	 * @param addListKeys
+	 * @param removeListKeys
+	 * @param addWithoutSeperator
+	 * @param addPatch
+	 * @return
+	 */
 	@SuppressWarnings("unchecked")
-	public static JSONObject getStorageJsonObject(
-			List<Pair<String, String>> addCompleteKeys,
-			List<String> removeCompleteKeys,
-			List<Pair<String, String>> addListKeys,
-			List<Pair<String, String>> removeListKeys,
-			List<Pair<String, String>> addWithoutSeperator, List<Pair<String, String>> addPatch) {
+	public static JSONObject getStorageJsonObject(List<Pair<String, String>> addCompleteKeys, List<String> removeCompleteKeys,
+			List<Pair<String, String>> addListKeys, List<Pair<String, String>> removeListKeys, List<Pair<String, String>> addWithoutSeperator,
+			List<Pair<String, String>> addPatch) {
 		JSONObject json = new JSONObject();
 
 		addListPairtoJson(addCompleteKeys, json, ADD_COMPLETE_KEY);
 
+		// removeCompleteKeys is only a list of keys so add them using "" as value
 		if (removeCompleteKeys != null && removeCompleteKeys.size() > 0) {
 			JSONObject jsonRemoveComplete = new JSONObject();
 
-			for (String key : removeCompleteKeys) {
+			for (String key : removeCompleteKeys)
 				jsonRemoveComplete.put(key, "");
-			}
 
 			json.put(REMOVE_COMPLETE_KEY, jsonRemoveComplete.toString());
 		}
@@ -67,210 +106,184 @@ public class StorageUtils {
 		addListPairtoJson(removeListKeys, json, REMOVE_LIST_KEY);
 
 		addListPairtoJson(addWithoutSeperator, json, ADD_KEY);
-		
+
 		addListPairtoJson(addPatch, json, PATCH_KEY);
 
 		return json;
-
 	}
 
+	/**
+	 * Add pairs of strings to JSON under specific key
+	 * <p>
+	 * Adds a list of String-pairs passed in <code>addListKeys</code> to the JSONObject <code>json</code> under the key <code>key</code>.
+	 * 
+	 * @param addListKeys
+	 * @param json
+	 * @param key
+	 */
 	@SuppressWarnings("unchecked")
-	public static void addListPairtoJson(
-			List<Pair<String, String>> addListKeys, JSONObject json, String key) {
+	public static void addListPairtoJson(List<Pair<String, String>> addListKeys, JSONObject json, String key) {
 		if (addListKeys != null && addListKeys.size() > 0) {
 			JSONObject innerJsonObject = new JSONObject();
 
-			for (Pair<String, String> pair : addListKeys) {
+			for (Pair<String, String> pair : addListKeys)
 				innerJsonObject.put(pair.getA(), pair.getB());
-			}
 
 			json.put(key, innerJsonObject.toString());
 		}
 	}
 
-	public static void processUpdate(byte[] data, byte[] signature,
-			PublicKeyAccount creator, DBSet db) {
+	/**
+	 * Process transaction and update name storage
+	 * <p>
+	 * 
+	 * @param data
+	 * @param signature
+	 * @param creator
+	 * @param db
+	 * @throws Exception
+	 */
+	public static void processUpdate(byte[] data, byte[] signature, PublicKeyAccount creator, DBSet db) throws Exception {
+		String dataAsString = new String(data, Charsets.UTF_8);
 
-			String string = new String(data, Charsets.UTF_8 );
-			
-			string = GZIP.webDecompress(string);
+		dataAsString = GZIP.webDecompress(dataAsString);
 
-			JSONObject jsonObject = (JSONObject) JSONValue.parse(string);
+		JSONObject jsonObject = (JSONObject) JSONValue.parse(dataAsString);
 
-			if (jsonObject != null) {
+		if (jsonObject == null)
+			return;
 
-				String name = (String) jsonObject.get("name");
+		Object jsonName = jsonObject.get("name");
 
-				OrphanNameStorageHelperMap orphanNameStorageHelperMap = db.getOrphanNameStorageHelperMap();
-				List<byte[]> list = orphanNameStorageHelperMap.get(name);
-				if(list == null || !ByteArrayUtils.contains(list, signature))
-				{
-					if (name != null) {
-						
-						Name nameObj = db.getNameMap().get(name);
-						
-						if (nameObj == null) {
-							
-							//addressstorage?
-							if(!name.equals(creator.getAddress()))
-							{
-								//they don't match do nothing!
-								return;
-							}
-							
-						}else
-						{
-							
-							if (!nameObj.getOwner().getAddress()
-									.equals(creator.getAddress())) {
-								// creator is not the owner of the name
-								return;
-							}
-						}
-						
-						
-						NameStorageMap nameStorageMap = db
-								.getNameStorageMap();
-						OrphanNameStorageMap orphanNameStorageMap = db.getOrphanNameStorageMap();
-						
-						Set<String> allKeysForOrphanSaving = getAllKeysForOrphanSaving(jsonObject);
-						
-						// SAVE OLD VALUES FOR ORPHANING
-						for (String keyForOrphaning : allKeysForOrphanSaving) {
-							orphanNameStorageMap.add(signature, keyForOrphaning,
-									nameStorageMap.getOpt(name, keyForOrphaning));
-						}
-						
-						db.getOrphanNameStorageHelperMap()
-						.add(name, signature);
-						
-						addTxChangesToStorage(jsonObject, name, nameStorageMap,
-								null);
-						
-					}
-				}
-				
+		// mandatory and must be string
+		if (jsonName == null || !(jsonName instanceof String))
+			throw new Exception("Name-storage transaction being processed has no \"name\" in data");
 
-			}
+		String name = (String) jsonName;
 
+		Name nameObj = db.getNameMap().get(name);
 
+		// if name not registered, we are keying by address which must match 'creator' address
+		if (nameObj == null && !name.equals(creator.getAddress()))
+			return;
+
+		// if name registered, check owner is 'creator'
+		if (nameObj != null && !nameObj.getOwner().getAddress().equals(creator.getAddress()))
+			return;
+
+		// Retrieve list of orphaned transactions for this name
+		OrphanNameStorageHelperMap orphanNameStorageHelperMap = db.getOrphanNameStorageHelperMap();
+		List<byte[]> list = orphanNameStorageHelperMap.get(name);
+
+		// If this transaction is in list then it's been processed already
+		if (list != null && ByteArrayUtils.contains(list, signature))
+			return;
+
+		NameStorageMap nameStorageMap = db.getNameStorageMap();
+		OrphanNameStorageMap orphanNameStorageMap = db.getOrphanNameStorageMap();
+
+		// Find all the storage keys that are affected by this transaction
+		Set<String> allKeysForOrphanSaving = getAllKeysForOrphanSaving(jsonObject);
+
+		// Save old values for keys affected by this transaction to allow possible future orphaning
+		for (String keyForOrphaning : allKeysForOrphanSaving)
+			orphanNameStorageMap.add(signature, keyForOrphaning, nameStorageMap.getOpt(name, keyForOrphaning));
+
+		// Actually process storage changes
+		addTxChangesToStorage(jsonObject, name, nameStorageMap, null);
+
+		// Save this transaction in list (above)
+		db.getOrphanNameStorageHelperMap().add(name, signature);
 	}
 
+	/**
+	 * Apply storage actions described in JSON to name storage
+	 * <p>
+	 * 
+	 * @param jsonObject
+	 * @param name
+	 * @param nameStorageMap
+	 * @param onlyTheseKeysOpt
+	 */
 	@SuppressWarnings("unchecked")
-	public static void addTxChangesToStorage(JSONObject jsonObject,
-			String name, NameStorageMap nameStorageMap,
-			Set<String> onlyTheseKeysOpt) {
-		String addCompleteJson = (String) jsonObject.get(ADD_COMPLETE_KEY);
-		if (addCompleteJson != null) {
-			JSONObject addCompleteResults = (JSONObject) JSONValue
-					.parse(addCompleteJson);
+	public static void addTxChangesToStorage(JSONObject jsonObject, String name, NameStorageMap nameStorageMap, Set<String> onlyTheseKeysOpt) {
 
+		JSONObject addCompleteResults = getDataByKey(jsonObject, ADD_COMPLETE_KEY);
+		if (addCompleteResults != null) {
 			Set<String> keys = addCompleteResults.keySet();
 
-			for (String key : keys) {
-
-				if (onlyTheseKeysOpt == null || onlyTheseKeysOpt.contains(key)) {
-					nameStorageMap.add(name, key,
-							"" + addCompleteResults.get(key));
-				}
-			}
-
+			for (String key : keys)
+				if (onlyTheseKeysOpt == null || onlyTheseKeysOpt.contains(key))
+					nameStorageMap.add(name, key, "" + addCompleteResults.get(key));
 		}
 
-		String removeJson = (String) jsonObject.get(REMOVE_COMPLETE_KEY);
-		if (removeJson != null) {
-
-			JSONObject removeCompleteResults = (JSONObject) JSONValue
-					.parse(removeJson);
-
+		JSONObject removeCompleteResults = getDataByKey(jsonObject, REMOVE_COMPLETE_KEY);
+		if (removeCompleteResults != null) {
 			Set<String> keys = removeCompleteResults.keySet();
 
-			for (String key : keys) {
-
-				if (onlyTheseKeysOpt == null || onlyTheseKeysOpt.contains(key)) {
+			for (String key : keys)
+				if (onlyTheseKeysOpt == null || onlyTheseKeysOpt.contains(key))
 					nameStorageMap.remove(name, key);
-				}
-			}
 		}
 
-		String addJsonList = (String) jsonObject.get(ADD_LIST_KEY);
-		if (addJsonList != null) {
+		JSONObject addListResults = getDataByKey(jsonObject, ADD_LIST_KEY);
+		if (addListResults != null) {
+			Set<String> keys = addListResults.keySet();
 
-			JSONObject addListKey = (JSONObject) JSONValue.parse(addJsonList);
-
-			Set<String> keys = addListKey.keySet();
-
-			for (String key : keys) {
+			for (String key : keys)
 				if (onlyTheseKeysOpt == null || onlyTheseKeysOpt.contains(key)) {
-					List<String> entriesToAdd = new ArrayList<>(
-							Arrays.asList(StringUtils.split(
-									"" + addListKey.get(key), ";")));
+					List<String> entriesToAdd = new ArrayList<>(Arrays.asList(StringUtils.split("" + addListResults.get(key), ";")));
 					nameStorageMap.addListEntries(name, key, entriesToAdd);
 				}
-			}
 		}
 
-		String removeJsonList = (String) jsonObject.get(REMOVE_LIST_KEY);
-		if (removeJsonList != null) {
+		JSONObject removeListResults = getDataByKey(jsonObject, REMOVE_LIST_KEY);
+		if (removeListResults != null) {
+			Set<String> keys = removeListResults.keySet();
 
-			JSONObject removeListKey = (JSONObject) JSONValue
-					.parse(removeJsonList);
-
-			Set<String> keys = removeListKey.keySet();
-
-			for (String key : keys) {
+			for (String key : keys)
 				if (onlyTheseKeysOpt == null || onlyTheseKeysOpt.contains(key)) {
-					List<String> entriesToAdd = new ArrayList<>(
-							Arrays.asList(StringUtils.split(
-									"" + removeListKey.get(key), ";")));
+					List<String> entriesToAdd = new ArrayList<>(Arrays.asList(StringUtils.split("" + removeListResults.get(key), ";")));
 					nameStorageMap.removeListEntries(name, key, entriesToAdd);
 				}
-			}
 		}
 
-		String addJson = (String) jsonObject.get(ADD_KEY);
-		if (addJson != null) {
+		JSONObject addResults = getDataByKey(jsonObject, ADD_KEY);
+		if (addResults != null) {
+			Set<String> keys = addResults.keySet();
 
-			JSONObject addJsonKey = (JSONObject) JSONValue.parse(addJson);
-
-			Set<String> keys = addJsonKey.keySet();
-
-			for (String key : keys) {
-
+			for (String key : keys)
 				if (onlyTheseKeysOpt == null || onlyTheseKeysOpt.contains(key)) {
 					String oldValueOpt = nameStorageMap.getOpt(name, key);
 					oldValueOpt = oldValueOpt == null ? "" : oldValueOpt;
-					nameStorageMap.add(name, key,
-							oldValueOpt + "" + addJsonKey.get(key));
+					nameStorageMap.add(name, key, oldValueOpt + "" + addResults.get(key));
 				}
-			}
 		}
-		
-		String patchJson = (String) jsonObject.get(PATCH_KEY);
-		if (patchJson != null) {
-			
-			JSONObject patchJsonKey = (JSONObject) JSONValue.parse(patchJson);
-			
-			Set<String> keys = patchJsonKey.keySet();
-			
-			for (String key : keys) {
-				
+
+		JSONObject patchResults = getDataByKey(jsonObject, PATCH_KEY);
+		if (patchResults != null) {
+			Set<String> keys = patchResults.keySet();
+
+			for (String key : keys)
 				if (onlyTheseKeysOpt == null || onlyTheseKeysOpt.contains(key)) {
 					String oldValueOpt = nameStorageMap.getOpt(name, key);
-					
+
 					oldValueOpt = oldValueOpt == null ? "" : oldValueOpt;
 					try {
-						nameStorageMap.add(name, key,
-								DiffHelper.patch(oldValueOpt, (String) patchJsonKey.get(key)));
+						nameStorageMap.add(name, key, DiffHelper.patch(oldValueOpt, (String) patchResults.get(key)));
 					} catch (Throwable e) {
-						Logger.getGlobal().info("Invalid patch!");
-						Logger.getGlobal().log(Level.FINE, "Invalid patch!", e);
+						LOGGER.warn("Invalid name storage patch for name \"" + name + "\" and key \"" + key + "\": " + e.getMessage());
 					}
 				}
-			}
 		}
 	}
 
+	/**
+	 * Scan all storage actions in JSON and find any sub-keys
+	 * 
+	 * @param jsonObject
+	 * @return
+	 */
 	private static Set<String> getAllKeysForOrphanSaving(JSONObject jsonObject) {
 		Set<String> results = new HashSet<>();
 		getKeys(jsonObject, results, ADD_COMPLETE_KEY);
@@ -283,111 +296,131 @@ public class StorageUtils {
 		return results;
 	}
 
-	private static void getKeys(JSONObject jsonObject, Set<String> results,
-			String mainKey) {
-		String addJson = (String) jsonObject.get(mainKey);
-		if (addJson != null) {
-			JSONObject addCompleteResults = (JSONObject) JSONValue
-					.parse(addJson);
+	/**
+	 * Find <code>mainKey</code> in JSON and add any sub-keys to <code>results</code>
+	 * <p>
+	 * 
+	 * @param jsonObject
+	 * @param results
+	 * @param mainKey
+	 */
+	private static void getKeys(JSONObject jsonObject, Set<String> results, String mainKey) {
+		JSONObject storageData = getDataByKey(jsonObject, mainKey);
 
-			@SuppressWarnings("unchecked")
-			Set<String> keys = addCompleteResults.keySet();
+		// mainKey isn't in JSON so bail out
+		if (storageData == null)
+			return;
 
-			results.addAll(keys);
+		// Extract all sub-keys
+		@SuppressWarnings("unchecked")
+		Set<String> keys = storageData.keySet();
 
-		}
+		// Add to results
+		results.addAll(keys);
 	}
 
-	public static void processOrphan(byte[] data, byte[] signature, DBSet db) {
+	/**
+	 * Unlink transaction from blockchain and undo storage changes
+	 * 
+	 * @param data
+	 * @param signature
+	 * @param db
+	 */
+	public static void orphanUpdate(byte[] data, byte[] signature, DBSet db) throws Exception {
+		String dataAsString = new String(data, Charsets.UTF_8);
 
-		String string = new String(data, Charsets.UTF_8 );
-		
-		string = GZIP.webDecompress(string);
+		dataAsString = GZIP.webDecompress(dataAsString);
 
-		JSONObject jsonObject = (JSONObject) JSONValue.parse(string);
+		JSONObject jsonObject = (JSONObject) JSONValue.parse(dataAsString);
 
-		if (jsonObject != null) {
+		if (jsonObject == null)
+			return;
 
-			String name = (String) jsonObject.get("name");
+		Object jsonName = jsonObject.get("name");
 
-			if (name != null) {
+		// mandatory and must be string
+		if (jsonName == null || !(jsonName instanceof String))
+			throw new Exception("Name-storage transaction being orphaned has no \"name\" in data");
 
-				Map<String, String> orphanMapForTx = db
-						.getOrphanNameStorageMap().get(signature);
+		String name = (String) jsonName;
 
-				if (orphanMapForTx != null) {
-					
-					//RESTORING SNAPSHOT FOR ALL CHANGED KEYS 
-					NameStorageMap nameStorageMap = db
-							.getNameStorageMap();
-					Set<String> keySet = orphanMapForTx.keySet();
+		// Check whether this transaction has been orphaned already
+		OrphanNameStorageHelperMap orphanNameStorageHelperMap = db.getOrphanNameStorageHelperMap();
+		List<byte[]> orphanableSignatures = orphanNameStorageHelperMap.get(name);
 
-					for (String key : keySet) {
-						Map<String, String> valueMapForName = nameStorageMap
-								.get(name);
-						if (valueMapForName != null) {
-							String value = orphanMapForTx.get(key);
-							if (value != null) {
-								nameStorageMap.add(name, key, value);
-							} else {
-								nameStorageMap.remove(name, key);
-							}
-						}
-					}
+		// If this transaction isn't in list then it's been orphaned already
+		if (orphanableSignatures == null || !ByteArrayUtils.contains(orphanableSignatures, signature))
+			return;
 
-					List<byte[]> listOfSignaturesForName = db
-							.getOrphanNameStorageHelperMap().get(name);
-					int indexOf =  ByteArrayUtils.indexOf(listOfSignaturesForName, signature);
-					indexOf++;
-					
-					OrphanNameStorageMap orphanNameStorageMap = db.getOrphanNameStorageMap();
-					// REDO ALL FOLLOWING TXS FOR THIS NAME (THIS TIME
-					// SELECTIVE)
-					for (int i = indexOf; i < listOfSignaturesForName.size(); i++) {
-						
-						byte[] signatureofFollowingTx = listOfSignaturesForName.get(i);
-						Transaction transaction = Controller.getInstance().getTransaction(signatureofFollowingTx, db);
-						byte[] dataOfFollowingTx = ((ArbitraryTransaction) transaction).getData();
-						
-						String dataOfFollowingTxSting = new String(dataOfFollowingTx,  Charsets.UTF_8 );
-						
-						JSONObject jsonObjectOfFollowingTx = (JSONObject) JSONValue.parse(dataOfFollowingTxSting);
-						
-						Set<String> allKeysForOrphanSaving = getAllKeysForOrphanSaving(jsonObjectOfFollowingTx);
-						
-						//ALL KEYS THAT THEY HAVE IN COMMON
-						Set<String> keysToSaveSnapshot = new HashSet<String>();
-						for (String key : keySet) {
-							if(allKeysForOrphanSaving.contains(key))
-							{
-								keysToSaveSnapshot.add(key);
-							}
-						}
-						
-						
-						// SAVE OLD VALUES FOR ORPHANING
-						for (String keyForOrphaning : keysToSaveSnapshot) {
-							orphanNameStorageMap.add(signatureofFollowingTx, keyForOrphaning,
-									nameStorageMap.getOpt(name, keyForOrphaning));
-						}
-						
-						
-						addTxChangesToStorage(jsonObjectOfFollowingTx, name, nameStorageMap, keySet);
-					}
+		// Grab saved previous values for keys in this transaction
+		Map<String, String> orphanMapForTx = db.getOrphanNameStorageMap().get(signature);
 
-					db.getOrphanNameStorageMap()
-							.delete(signature);
-					
-					db
-					.getOrphanNameStorageHelperMap().remove(name, signature);
+		// If absent, something must have gone wrong
+		if (orphanMapForTx == null)
+			throw new Exception("Can't orphan name storage transaction due to missing saved values");
 
-				}
+		// Grab current name storage values
+		NameStorageMap nameStorageMap = db.getNameStorageMap();
+		Map<String, String> valueMapForName = nameStorageMap.get(name);
 
+		// No name storage for this name? Something wrong
+		if (valueMapForName == null)
+			throw new Exception("Can't orphan name storage transaction due to missing current values");
+
+		// Use saved orphan values to rollback to before this transaction
+		Set<String> keySet = orphanMapForTx.keySet();
+		for (String key : keySet) {
+			String value = orphanMapForTx.get(key);
+
+			if (value != null) {
+				nameStorageMap.add(name, key, value);
+			} else {
+				nameStorageMap.remove(name, key);
 			}
 		}
+
+		// Reapply following transactions (only need to do common keys), updating their saved orphan values
+		int indexOf = ByteArrayUtils.indexOf(orphanableSignatures, signature);
+		indexOf++;
+		for (int i = indexOf; i < orphanableSignatures.size(); ++i) {
+			// Get signature of following transaction (if any)
+			byte[] followingSignature = orphanableSignatures.get(i);
+
+			// Grab following transaction
+			Transaction followingTransaction = Controller.getInstance().getTransaction(followingSignature, db);
+
+			// Bad news if we can't retrieve transaction!
+			if (followingTransaction == null)
+				throw new Exception("Can't find following transaction during name storage orphaning");
+
+			// Extract transaction data, decompress, etc.
+			byte[] followingData = ((ArbitraryTransaction) followingTransaction).getData();
+			String followingDataAsString = new String(followingData, Charsets.UTF_8);
+			followingDataAsString = GZIP.webDecompress(followingDataAsString);
+			JSONObject followingJsonObject = (JSONObject) JSONValue.parse(followingDataAsString);
+
+			// Extract all sub-keys
+			Set<String> allKeysForOrphanSaving = getAllKeysForOrphanSaving(followingJsonObject);
+
+			// Only process sub-keys that following transaction has in common with transaction being orphaned
+			Set<String> keysToSaveSnapshot = new HashSet<String>();
+			for (String key : keySet)
+				if (allKeysForOrphanSaving.contains(key))
+					keysToSaveSnapshot.add(key);
+
+			// Update post-orphan previous values for this [following] transaction
+			OrphanNameStorageMap orphanNameStorageMap = db.getOrphanNameStorageMap();
+			for (String keyForOrphaning : keysToSaveSnapshot)
+				orphanNameStorageMap.add(followingSignature, keyForOrphaning, nameStorageMap.getOpt(name, keyForOrphaning));
+
+			// Re-apply name storage updates for this [following] transaction, common keys only
+			addTxChangesToStorage(followingJsonObject, name, nameStorageMap, keySet);
+		}
+
+		// Delete saved previous values for orphaned transaction as no longer needed
+		db.getOrphanNameStorageMap().delete(signature);
+
+		// Delete orphaned transaction from list of orphanable transactions for this name
+		db.getOrphanNameStorageHelperMap().remove(name, signature);
 	}
-
-
-	
-
 }

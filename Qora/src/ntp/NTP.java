@@ -6,62 +6,55 @@ import lang.Lang;
 
 import org.apache.commons.net.ntp.NTPUDPClient;
 import org.apache.commons.net.ntp.TimeInfo;
-import org.apache.log4j.Logger;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
-public final class NTP
-{
-	
-	private static final Logger LOGGER = Logger.getLogger(NTP.class);
-	private static final long TIME_TILL_UPDATE = 1000*60*10;
+public final class NTP {
+
+	private static final Logger LOGGER = LogManager.getLogger(NTP.class);
+	private static final long TIME_TILL_UPDATE = 1000 * 60 * 10;
 	private static final String NTP_SERVER = "pool.ntp.org";
-	
+
 	private static long lastUpdate = 0;
 	private static long offset = 0;
-   
-	public static long getTime()
-	{
-		//CHECK IF OFFSET NEEDS TO BE UPDATED
-		if(System.currentTimeMillis() > lastUpdate + TIME_TILL_UPDATE)
-		{
-			updateOffSet();
+
+	public static long getTime() {
+		// Every so often use NTP to find out offset between this system's time and internet time
+		if (System.currentTimeMillis() > lastUpdate + TIME_TILL_UPDATE) {
+			updateOffset();
 			lastUpdate = System.currentTimeMillis();
-			
-			//LOG OFFSET
+
+			// Log new value of offset
 			LOGGER.info(Lang.getInstance().translate("Adjusting time with %offset% milliseconds.").replace("%offset%", String.valueOf(offset)));
 		}
-	   
-		//CALCULATE CORRECTED TIME
+
+		// Return time that is nearer internet time
 		return System.currentTimeMillis() + offset;
 	}
-   
-	private static void updateOffSet()
-	{
-		//CREATE CLIENT
+
+	private static void updateOffset() {
+		// Create NTP client
 		NTPUDPClient client = new NTPUDPClient();
-	   
-		//SET TIMEOUT
+
+		// Set communications timeout
 		client.setDefaultTimeout(10000);
-		try 
-		{
-			//OPEN CLIENT
+		try {
+			// Open client (create socket, etc.)
 			client.open();
-          
-			//GET INFO FROM NTP SERVER
+
+			// Get time info from NTP server
 			InetAddress hostAddr = InetAddress.getByName(NTP_SERVER);
 			TimeInfo info = client.getTime(hostAddr);
 			info.computeDetails();
-           
-			//UPDATE OFFSET
-			if(info.getOffset() != null)
-			{
+
+			// Cache offset between this system's time and internet time
+			if (info.getOffset() != null)
 				offset = info.getOffset();
-			} 
-		} 
-		catch (Exception e) 
-		{
-    	   	//ERROR GETTING OFFSET
+		} catch (Exception e) {
+			// Error while communicating with NTP server - ignored
 		}
 
-		client.close(); 
-   }
+		// We're done with NTP client
+		client.close();
+	}
 }

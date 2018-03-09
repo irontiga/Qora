@@ -9,7 +9,6 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.URL;
-import java.nio.file.Files;
 import java.security.SecureRandom;
 import java.text.DateFormat;
 import java.text.ParseException;
@@ -34,7 +33,8 @@ import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 
 import org.apache.commons.io.FileUtils;
-import org.apache.log4j.Logger;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.mapdb.Fun.Tuple2;
 
 import com.google.common.primitives.Longs;
@@ -45,7 +45,9 @@ import at.AT;
 import database.DBSet;
 import database.LocalDataMap;
 import database.SortableList;
+import gui.ClosingDialog;
 import gui.Gui;
+import gui.SplashFrame;
 import lang.Lang;
 import network.Network;
 import network.Peer;
@@ -82,7 +84,6 @@ import settings.Settings;
 import utils.DateTimeFormat;
 import utils.ObserverMessage;
 import utils.Pair;
-import utils.SimpleFileVisitorForRecursiveFolderDeletion;
 import utils.SysTray;
 import utils.UpdateUtil;
 import webserver.WebService;
@@ -92,12 +93,12 @@ public class Controller extends Observable {
 	
 	
 	
-	private static final Logger LOGGER = Logger.getLogger(Controller.class);
-	private String version = "0.26.2.1";
-	private String buildTime = "2017-11-06 11:33:00 UTC";
+	private static final Logger LOGGER = LogManager.getLogger(Controller.class);
+	private String version = "0.26.6";
+	private String buildTime = "2018-03-02 09:55:00 UTC";
 	private long buildTimestamp;
 	
-	public static final String releaseVersion = "0.26.2.1";
+	public static final String releaseVersion = "0.26.6";
 
 //	TODO ENUM would be better here
 	public static final int STATUS_NO_CONNECTIONS = 0;
@@ -311,76 +312,92 @@ public class Controller extends Observable {
 		this.status = STATUS_NO_CONNECTIONS;
 		this.transactionCreator = new TransactionCreator();
 
+		SplashFrame.getInstance().updateProgress("Opening databases");
+		
 		// OPENING DATABASES
 		try {
 			DBSet.getInstance();
 		} catch (Throwable e) {
 			LOGGER.error(e.getMessage(),e);
 			LOGGER.info(Lang.getInstance().translate("Error during startup detected trying to restore backup database..."));
+
+			SplashFrame.getInstance().updateProgress("Creating databases");
 			reCreateDB();
 		}
 
 //		startFromScratchOnDemand();
 
+		// If BlockMap database was closed while processing a block
+		// then assume all databases are corrupt and rebuild from scratch
 		if (DBSet.getInstance().getBlockMap().isProcessing()) {
 			try {
 				DBSet.getInstance().close();
 			} catch (Throwable e) {
 				LOGGER.error(e.getMessage(),e);
 			}
+
+			SplashFrame.getInstance().updateProgress("Recreating databases");
 			reCreateDB();
 		}
 		
-		//CHECK IF DB NEEDS UPDATE
+		// Check whether DB needs updates
+		if (DBSet.getInstance().getBlockMap().getLastBlockSignature() != null) {
+			LocalDataMap localDataMap = DBSet.getInstance().getLocalDataMap();
 
-		if(DBSet.getInstance().getBlockMap().getLastBlockSignature() != null)
-		{
-			//CHECK IF NAME STORAGE NEEDS UPDATE
-			if (DBSet.getInstance().getLocalDataMap().get("nsupdate") == null )
-			{
-				//FIRST NAME STORAGE UPDATE
-				UpdateUtil.repopulateNameStorage( 70000 );
-				DBSet.getInstance().getLocalDataMap().set("nsupdate", "1");
+			// Check whether name storage needs rebuilding
+			if (localDataMap.get("nsupdate") == null || !localDataMap.get("nsupdate").equals("2")) {
+				SplashFrame.getInstance().updateProgress("Rebuilding name storage");
+
+				// Rebuild name storage
+				UpdateUtil.repopulateNameStorage( 70000 ); // Don't bother scanning blocks below height 70,000
+				localDataMap.set("nsupdate", "2");
 			}
-			//CREATE TRANSACTIONS FINAL MAP
-			if (DBSet.getInstance().getLocalDataMap().get("txfinalmap") == null || !DBSet.getInstance().getLocalDataMap().get("txfinalmap").equals("2"))
-			{
-				//FIRST NAME STORAGE UPDATE
-				UpdateUtil.repopulateTransactionFinalMap(  );
-				DBSet.getInstance().getLocalDataMap().set("txfinalmap", "2");
+			// Check whether final transaction map needs rebuilding
+			if (localDataMap.get("txfinalmap") == null || !localDataMap.get("txfinalmap").equals("2")) {
+				SplashFrame.getInstance().updateProgress("Rebuilding transaction-block mapping");
+
+				// Rebuild final transaction map
+				UpdateUtil.repopulateTransactionFinalMap();
+				localDataMap.set("txfinalmap", "2");
 			}
 			
-			if (DBSet.getInstance().getLocalDataMap().get("blogpostmap") == null ||  !DBSet.getInstance().getLocalDataMap().get("blogpostmap").equals("2"))
-			{
-				//recreate comment postmap
+			if (localDataMap.get("blogpostmap") == null || !localDataMap.get("blogpostmap").equals("3")) {
+				SplashFrame.getInstance().updateProgress("Rebuilding blog comments");
+
+				// Recreate comment postmap
 				UpdateUtil.repopulateCommentPostMap();
-				DBSet.getInstance().getLocalDataMap().set("blogpostmap", "2");
+				localDataMap.set("blogpostmap", "3");
 			}
 		} else {
-			DBSet.getInstance().getLocalDataMap().set("nsupdate", "1");
+			DBSet.getInstance().getLocalDataMap().set("nsupdate", "2");
 			DBSet.getInstance().getLocalDataMap().set("txfinalmap", "2");
-			DBSet.getInstance().getLocalDataMap().set("blogpostmap", "2");
+			DBSet.getInstance().getLocalDataMap().set("blogpostmap", "3");
 		}
 		
 		// CREATE SYNCHRONIZOR
+		SplashFrame.getInstance().updateProgress("Starting synchronizer");
 		this.synchronizer = new Synchronizer();
 
 		// CREATE BLOCKCHAIN
+		SplashFrame.getInstance().updateProgress("Starting blockchain");
 		this.blockChain = new BlockChain();
 		
 		// START API SERVICE
 		if (Settings.getInstance().isRpcEnabled()) {
+			SplashFrame.getInstance().updateProgress("Starting RPC API");
 			this.rpcService = new ApiService();
 			this.rpcService.start();
 		}
 
 		// START WEB SERVICE
 		if (Settings.getInstance().isWebEnabled()) {
+			SplashFrame.getInstance().updateProgress("Starting web service");
 			this.webService = new WebService();
 			this.webService.start();
 		}
 
 		// CREATE WALLET
+		SplashFrame.getInstance().updateProgress("Starting wallet");
 		this.wallet = new Wallet();
 
 	    if(this.wallet.isWalletDatabaseExisting()){
@@ -392,11 +409,13 @@ public class Controller extends Observable {
 		}
 		
 		// CREATE BLOCKGENERATOR
+		SplashFrame.getInstance().updateProgress("Starting block generator");
 		this.blockGenerator = new BlockGenerator();
 		// START BLOCKGENERATOR
 		this.blockGenerator.start();
 
 		// CREATE NETWORK
+		SplashFrame.getInstance().updateProgress("Starting networking");
 		this.network = new Network();
 
 		// CLOSE ON UNEXPECTED SHUTDOWN
@@ -452,39 +471,39 @@ public class Controller extends Observable {
 	}
 	
 	public void reCreateDB(boolean useDataBak) throws IOException, Exception {
-		
 		File dataDir = new File(Settings.getInstance().getDataDir());
+
 		if (dataDir.exists()) {
-			// delete data folder
-			java.nio.file.Files.walkFileTree(dataDir.toPath(),
-					new SimpleFileVisitorForRecursiveFolderDeletion());
+			// Delete data folder (if any)
+			DBSet.deleteDataDir();
+
+			// Try to use backup?
 			File dataBak = getDataBakDir(dataDir);
-			if (useDataBak && dataBak.exists()
-					&& Settings.getInstance().isCheckpointingEnabled()) {
-				FileUtils.copyDirectory(dataBak, dataDir);
+			if (useDataBak && dataBak.exists() && Settings.getInstance().isCheckpointingEnabled()) {
+				FileUtils.copyDirectory(dataBak, dataDir); // Assumes dataDir exists
+
 				LOGGER.info(Lang.getInstance().translate("restoring backup database"));
+
 				try {
 					DBSet.reCreateDatabase();
 				} catch (IOError e) {
 					LOGGER.error(e.getMessage(),e);
-					//backupdb is buggy too starting from scratch
-					if(dataDir.exists())
-					{
-						java.nio.file.Files.walkFileTree(dataDir.toPath(),
-								new SimpleFileVisitorForRecursiveFolderDeletion());
-					}
-					if(dataBak.exists())
-					{
-						java.nio.file.Files.walkFileTree(dataBak.toPath(),
-								new SimpleFileVisitorForRecursiveFolderDeletion());
-					} 
+
+					// backup DB is buggy too - start from scratch
+
+					// delete data folder
+					DBSet.deleteDataDir();
+
+					// delete backup data folder
+					DBSet.deleteDataBackup();
+
 					DBSet.reCreateDatabase();
 				}
-				
 			} else {
 				DBSet.reCreateDatabase();
 			}
-
+		} else {
+			DBSet.reCreateDatabase();
 		}
 
 		if (DBSet.getInstance().getBlockMap().isProcessing()) {
@@ -500,22 +519,14 @@ public class Controller extends Observable {
 				.get(LocalDataMap.LOCAL_DATA_VERSION_KEY);
 
 		if (dataVersion == null || !dataVersion.equals(releaseVersion)) {
-			File dataDir = new File(Settings.getInstance().getDataDir());
-			File dataBak = getDataBakDir(dataDir);
 			DBSet.getInstance().close();
 
-			if (dataDir.exists()) {
-				// delete data folder
-				java.nio.file.Files.walkFileTree(dataDir.toPath(),
-						new SimpleFileVisitorForRecursiveFolderDeletion());
+			// delete data folder
+			DBSet.deleteDataDir();
 
-			}
+			// delete backup data folder
+			DBSet.deleteDataBackup();
 
-			if (dataBak.exists()) {
-				// delete data folder
-				java.nio.file.Files.walkFileTree(dataBak.toPath(),
-						new SimpleFileVisitorForRecursiveFolderDeletion());
-			}
 			DBSet.reCreateDatabase();
 
 			DBSet.getInstance()
@@ -611,26 +622,32 @@ public class Controller extends Observable {
 			// STOP SENDING OUR HEIGHT TO PEERS
 			this.timerPeerHeightUpdate.cancel();
 
-			// STOP MESSAGE PROCESSOR
-			LOGGER.info(Lang.getInstance().translate("Stopping message processor"));
-			this.network.stop();
-
 			// STOP BLOCK PROCESSOR
 			LOGGER.info(Lang.getInstance().translate("Stopping block processor"));
+			ClosingDialog.getInstance().updateProgress("Stopping block processor");
 			this.synchronizer.stop();
 
 			// STOP BLOCK GENERATOR
-            LOGGER.info(Lang.getInstance().translate("Stopping block generator"));
-            this.blockGenerator.shutdown();
+			LOGGER.info(Lang.getInstance().translate("Stopping block generator"));
+			ClosingDialog.getInstance().updateProgress("Stopping block generator");
+			this.blockGenerator.shutdown();
+
+			// STOP MESSAGE PROCESSOR
+			LOGGER.info(Lang.getInstance().translate("Stopping message processor"));
+			ClosingDialog.getInstance().updateProgress("Stopping message processor");
+			this.network.stop();
 
 			// CLOSE DATABASE
 			LOGGER.info(Lang.getInstance().translate("Closing database"));
+			ClosingDialog.getInstance().updateProgress("Closing database");
 			DBSet.getInstance().close();
 
 			// CLOSE WALLET
 			LOGGER.info(Lang.getInstance().translate("Closing wallet"));
+			ClosingDialog.getInstance().updateProgress("Closing wallet");
 			this.wallet.close();
 
+			ClosingDialog.getInstance().updateProgress("Creating database backup");
 			createDataCheckpoint();
 
 			LOGGER.info(Lang.getInstance().translate("Closed."));
@@ -646,24 +663,15 @@ public class Controller extends Observable {
 
 			File dataBak = getDataBakDir(dataDir);
 
-			if (dataDir.exists()) {
-				if (dataBak.exists()) {
-					try {
-						Files.walkFileTree(
-								dataBak.toPath(),
-								new SimpleFileVisitorForRecursiveFolderDeletion());
-					} catch (IOException e) {
-						LOGGER.error(e.getMessage(),e);
-					}
-				}
-				try {
-					FileUtils.copyDirectory(dataDir, dataBak);
-				} catch (IOException e) {
-					LOGGER.error(e.getMessage(),e);
-				}
+			// delete old backup (if any)
+			DBSet.deleteDataBackup();
 
+			// copy existing DB as backup
+			try {
+				FileUtils.copyDirectory(dataDir, dataBak);
+			} catch (IOException e) {
+				LOGGER.error(e.getMessage(),e);
 			}
-
 		}
 
 	}
@@ -782,6 +790,10 @@ public class Controller extends Observable {
 				// UPDATE STATUS
 				this.status = STATUS_NO_CONNECTIONS;
 
+				// If we're shutting down then don't notify observers
+				// in case they attempt to access DB
+				if (this.isStopping)
+					return;
 				
 				// NOTIFY
 				this.setChanged();
@@ -1221,7 +1233,7 @@ public class Controller extends Observable {
 			}
 		}
 
-		if (!GraphicsEnvironment.isHeadless() &&  (Settings.getInstance().isGuiEnabled() || Settings.getInstance().isSysTrayEnabled()) ) {
+		if (!GraphicsEnvironment.isHeadless() && Gui.isGuiStarted() ) {
 			Gui gui = Gui.getInstance();
 			SysTray.getInstance().sendMessage(Lang.getInstance().translate("INCOMING API CALL"),
 					Lang.getInstance().translate("An API call needs authorization!"), MessageType.WARNING);
